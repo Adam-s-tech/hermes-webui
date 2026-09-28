@@ -957,19 +957,23 @@ def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | Non
     except Exception:
         logger.debug("Failed to read run journal for reattached stream %s", stream_id, exc_info=True)
         events = []
-    relayed = []
+    stateful, cursor = [], -1
     for row in events:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        seq = payload.get("gateway_seq")
         if row.get("event") in {"token", "reasoning", "tool", "tool_complete"}:
-            if not isinstance(payload.get("gateway_seq"), int):
+            if not isinstance(seq, int):
                 return None
-            relayed.append((row["event"], payload))
-    for name, payload in relayed:
+            stateful.append((row["event"], payload))
+        # Every relayed row (approval included) advances the cursor, not just the stateful ones.
+        if isinstance(seq, int):
+            cursor = max(cursor, seq)
+    for name, payload in stateful:
         if name == "token":
             STREAM_PARTIAL_TEXT[stream_id] = STREAM_PARTIAL_TEXT.get(stream_id, "") + str(payload.get("text") or "")
         else:
             _note_live_gateway_event(stream_id, name, payload)
-    return max((payload["gateway_seq"] for _name, payload in relayed), default=-1)
+    return cursor
 
 
 def _await_gateway_run_result(

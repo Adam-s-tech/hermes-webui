@@ -671,3 +671,33 @@ def test_reattach_resurfaces_an_approval_relayed_before_the_restart(isolated_ses
 
     assert relayed == ["appr-9"]
     assert _saved(sid)["messages"][-1]["content"] == "checking done"
+
+
+def test_reattach_cursor_includes_a_journaled_approval_so_it_is_not_relayed_twice(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_parked_journaled")
+    parked = {"event": "approval.request", "approval_id": "appr-7", "command": "rm y", "description": "d"}
+    _relayed_before_restart(sid, stream_id, [
+        ("token", {"text": "checking ", "gateway_seq": 0}),
+        ("approval", {"approval_id": "appr-7", "command": "rm y", "pending_count": 1, "gateway_seq": 1}),
+    ])
+    relayed, opened = [], []
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {
+        "run_id": r, "status": "waiting_for_approval", "approval": parked,
+    })
+    monkeypatch.setattr(
+        gateway_chat, "_relay_gateway_run_approval",
+        lambda session_id, run_id, payload, *a, **k: relayed.append(payload["approval_id"]),
+    )
+    history = [(1, parked), (2, {"event": "message.delta", "delta": "done"}), (3, {"event": "run.completed"})]
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append(last_seq)  # sent as Last-Event-ID; the gateway replays only seq > last_seq
+        return _sse(*[(s, p) for s, p in history if s > last_seq])
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert opened == [1]
+    assert relayed == ["appr-7"]
+    assert _saved(sid)["messages"][-1]["content"] == "checking done"
