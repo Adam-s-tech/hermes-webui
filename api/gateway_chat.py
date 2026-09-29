@@ -639,11 +639,12 @@ def _open_gateway_run_events(base_url, headers, run_id, last_seq: int = -1):
 
 def _relay_gateway_run_events(
     resp, session_id, stream_id, run_id, base_url, api_key,
-    *, put_gateway_event, cancel_event, on_seq=None, final_text="",
+    *, put_gateway_event, cancel_event, on_seq=None, final_text="", stop_on_truncated=False,
 ):
     """Relay one /v1/runs/{id}/events stream; returns (text or None if cancelled, usage, outcome).
 
-    outcome is "ended", "eof", or "truncated" (the gateway dropped events after our cursor).
+    outcome is "ended", "eof", or "truncated" (the gateway dropped events after our cursor;
+    only returned with ``stop_on_truncated``, otherwise the retained events keep relaying).
     Relayed payloads carry ``gateway_seq`` so the WebUI run journal records the gateway cursor.
     """
     usage: dict = {}
@@ -684,7 +685,11 @@ def _relay_gateway_run_events(
         payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
         seq = payload.get("seq") if isinstance(payload.get("seq"), int) else None
         if payload_event == "replay.truncated":
-            return final_text, usage, "truncated"
+            if stop_on_truncated:
+                return final_text, usage, "truncated"
+            logger.info("Gateway replay for run %s truncated; relaying retained events", run_id)
+            sse_event = "message"
+            continue
         if payload_event == "approval.request":
             _relay_gateway_run_approval(
                 session_id, run_id, payload, base_url, api_key,
@@ -1020,6 +1025,7 @@ def _await_gateway_run_result(
                         resp, session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event, cancel_event=cancel_event,
                         on_seq=lambda seq: last_seq.__setitem__(0, seq), final_text=STREAM_PARTIAL_TEXT.get(stream_id, ""),
+                        stop_on_truncated=True,
                     )
                 if outcome == "ended":
                     return text, usage

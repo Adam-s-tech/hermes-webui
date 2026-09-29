@@ -120,6 +120,43 @@ def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessi
     assert saved["messages"][-1]["content"] == "done"
 
 
+def test_live_send_keeps_relaying_after_initial_replay_truncated(isolated_sessions, monkeypatch):
+    s = new_session()
+    stream_id = "stream-live-trunc"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "hi"
+    s.pending_attachments = []
+    s.pending_started_at = 123.0
+    s.save()
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "POST":
+            return io.BytesIO(b'{"run_id":"run_live_trunc"}')
+        return io.BytesIO(
+            b'data: {"event":"replay.truncated","oldest_retained_seq":1200}\n\n'
+            b'data: {"event":"message.delta","delta":"kept answer","seq":1200}\n\n'
+            b'data: {"event":"run.completed","output":"kept answer","seq":1201}\n\n'
+            b"data: [DONE]\n\n"
+        )
+
+    monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a, **k: True)
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", _REAL_OPEN_EVENTS)
+    monkeypatch.setattr(
+        gateway_chat, "_get_gateway_run_status",
+        lambda *a: pytest.fail("live send must not fall back to status polling"),
+    )
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(s.session_id, "hi", "test-model", "/tmp", stream_id, [])
+
+    saved = _saved(s.session_id)
+    assert saved["active_stream_id"] is None
+    assert saved["messages"][-1]["role"] == "assistant"
+    assert saved["messages"][-1]["content"] == "kept answer"
+
+
 def test_restart_reattaches_and_writes_back_real_answer(isolated_sessions, monkeypatch):
     sid, stream_id = _orphaned_gateway_turn()
     release = threading.Event()
