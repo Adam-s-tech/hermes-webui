@@ -232,6 +232,13 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 **Why.** WebUI imports `run_agent.AIAgent` into its long-lived Python process. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision. Local Agent-backed actions return a retryable `409 agent_runtime_stale` with `restart_scheduled: false` before accepting a new turn. Gateway- and runner-owned chat keep their existing runtime ownership. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare; losing a previously known revision remains fail-closed.
 
+Revision checks allow up to 10 seconds for each of the three local Git reads
+(worktree root, tracked module, and HEAD), so a slow read that completes within
+that budget does not falsely look like a changed runtime. A timed-out or failed
+read still blocks a previously identified Git runtime; this does not bypass the
+revision guard or schedule an automatic restart. In the worst case these
+sequential reads can delay admission by about 30 seconds.
+
 **Diagnostic.** The stale-runtime response includes `agent_update_state`, also preserved in asynchronous compression error status:
 
 | Value | Observation |

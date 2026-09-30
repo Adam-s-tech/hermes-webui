@@ -36,6 +36,9 @@ _RESTART_REQUIRED_MESSAGE = (
 _AGENT_UPDATE_MARKER = ".hermes-update-in-progress"
 _AGENT_RECOVERY_MARKERS = (".update-incomplete", ".lazy-refresh-incomplete")
 _AGENT_UPDATE_MAX_AGE_SECONDS = 20 * 60
+# Slow local Git reads must not look like source drift after just two seconds.
+# Keep a finite budget per command; unreadable revisions still fail closed.
+_GIT_REVISION_TIMEOUT_SECONDS = 10
 # The update marker holds a PID and a start timestamp (two short numeric lines).
 # Anything larger is not a legitimate marker; cap the read so a huge or growing
 # regular file can never exhaust memory on the stale-runtime request path.
@@ -83,7 +86,7 @@ def _read_agent_revision(
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
             creationflags=windows_hide_flags(),
         )
         if worktree_result.returncode != 0:
@@ -104,7 +107,7 @@ def _read_agent_revision(
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
             creationflags=windows_hide_flags(),
         )
         if tracked_result.returncode != 0:
@@ -114,7 +117,7 @@ def _read_agent_revision(
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
             creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError):
