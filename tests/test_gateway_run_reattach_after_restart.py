@@ -676,9 +676,10 @@ def test_reattach_falls_back_to_status_polling(isolated_sessions, monkeypatch, w
         return _sse((None, {"event": "replay.truncated", "oldest_retained_seq": 40}), (40, {"event": "message.delta", "delta": "x"}))
 
     monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    statuses = iter(["running"])  # the pre-stream probe sees the run still going
     monkeypatch.setattr(
         gateway_chat, "_get_gateway_run_status",
-        lambda b, k, r: {"run_id": r, "status": "completed", "output": "full answer from status"},
+        lambda b, k, r: {"run_id": r, "status": next(statuses, "completed"), "output": "full answer from status"},
     )
     gateway_chat.resume_gateway_runs_after_restart()
     _wait_for_reattach_threads()
@@ -738,3 +739,65 @@ def test_reattach_cursor_includes_a_journaled_approval_so_it_is_not_relayed_twic
     assert opened == [1]
     assert relayed == ["appr-7"]
     assert _saved(sid)["messages"][-1]["content"] == "checking done"
+
+
+class _ResetAfter(io.BytesIO):
+    """An event stream whose connection resets once its bytes are consumed."""
+
+    def __next__(self):
+        line = self.readline()
+        if not line:
+            raise ConnectionResetError("reset by peer")
+        return line
+
+
+def test_reattach_cursor_commits_an_event_as_soon_as_it_is_relayed(isolated_sessions, monkeypatch):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_reset_mid_frame")
+    _relayed_before_restart(sid, stream_id, [("token", {"text": "", "gateway_seq": 0})])
+    history = [(1, {"event": "message.delta", "delta": "A"}), (2, {"event": "run.completed", "output": "A"})]
+    opened = []
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append(last_seq)
+        if len(opened) == 1:
+            # Token A arrives, then the connection resets before the blank frame separator.
+            return _ResetAfter(b"id: 1\n" + f"data: {json.dumps(dict(history[0][1], seq=1))}\n".encode())
+        return _sse(*[(s, p) for s, p in history if s > last_seq])
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: {"run_id": r, "status": "running"})
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert opened == [0, 1]
+    assert [e["payload"]["text"] for e in _journal(sid, stream_id) if e["event"] == "token" and e["payload"].get("text")] == ["A"]
+    assert _saved(sid)["messages"][-1]["content"] == "A"
+
+
+@pytest.mark.parametrize("journaled", [True, False], ids=["cursor", "empty_journal"])
+def test_reattach_probe_and_replay_surface_one_approval_once(isolated_sessions, monkeypatch, journaled):
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_parked_replayed")
+    if journaled:
+        _relayed_before_restart(sid, stream_id, [("token", {"text": "checking ", "gateway_seq": 0})])
+    parked = {"event": "approval.request", "approval_id": "appr-3", "command": "rm z", "description": "d"}
+    order = []
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", lambda b, k, r: order.append("probe") or {
+        "run_id": r, "status": "waiting_for_approval", "approval": parked,
+    })
+    monkeypatch.setattr(
+        gateway_chat, "_relay_gateway_run_approval",
+        lambda session_id, run_id, payload, *a, **k: order.append(("approval", payload["approval_id"])),
+    )
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        order.append("events")
+        # The gateway replays the still-pending approval after the cursor.
+        return _sse((1, parked), (2, {"event": "message.delta", "delta": "done"}), (3, {"event": "run.completed"}))
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    # The status probe runs before the first blocking /events read, whatever the cursor.
+    assert order == ["probe", ("approval", "appr-3"), "events"]
+    assert _saved(sid)["messages"][-1]["content"].endswith("done")
