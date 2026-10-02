@@ -645,7 +645,7 @@ def _open_gateway_run_events(base_url, headers, run_id, last_seq: int = -1):
 def _relay_gateway_run_events(
     resp, session_id, stream_id, run_id, base_url, api_key,
     *, put_gateway_event, cancel_event, on_seq=None, final_text="", stop_on_truncated=False,
-    surfaced_approval_ids=None,
+    surfaced_approval_ids=None, output_is_authoritative=False, approval_is_current=None,
 ):
     """Relay one /v1/runs/{id}/events stream; returns (text or None if cancelled, usage, outcome).
 
@@ -654,6 +654,9 @@ def _relay_gateway_run_events(
     Relayed payloads carry ``gateway_seq`` so the WebUI run journal records the gateway cursor;
     ``on_seq`` commits each seq as soon as its event is relayed, so a reconnect never re-emits it.
     ``surfaced_approval_ids`` is shared with the reattach status probe so one approval surfaces once.
+    ``output_is_authoritative`` lets ``run.completed.output`` replace streamed text (reattach: the
+    Agent may transform its answer after streaming). ``approval_is_current`` drops replayed approvals
+    the Gateway no longer has pending.
     """
     usage: dict = {}
     outcome = "eof"
@@ -703,7 +706,8 @@ def _relay_gateway_run_events(
             continue
         if payload_event == "approval.request":
             approval_key = _gateway_approval_key(payload)
-            if surfaced_approval_ids is None or approval_key not in surfaced_approval_ids:
+            already = surfaced_approval_ids is not None and approval_key in surfaced_approval_ids
+            if not already and (approval_is_current is None or approval_is_current(payload)):
                 if surfaced_approval_ids is not None and approval_key:
                     surfaced_approval_ids.add(approval_key)
                 _relay_gateway_run_approval(
@@ -744,7 +748,7 @@ def _relay_gateway_run_events(
             if payload.get("error"):
                 raise RuntimeError(str(payload["error"]))
             output = str(payload.get("output") or "")
-            if output and not final_text:
+            if output and (output_is_authoritative or not final_text):
                 final_text = output
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] = output
@@ -1017,6 +1021,19 @@ def _await_gateway_run_result(
     last_seq = [resume_seq if resume_seq is not None else -1]
     streaming = resume_seq is not None
 
+    def approval_is_current(payload):
+        # Auto-approved before the restart leaves no journal row; only the Gateway knows it is settled.
+        try:
+            status = _get_gateway_run_status(base_url, api_key, run_id)
+        except (urllib.error.URLError, OSError, ValueError):
+            return True  # fail open: a stale card 409s, a missing one stalls the run
+        approval = status.get("approval")
+        return (
+            str(status.get("status") or "").strip().lower() == "waiting_for_approval"
+            and isinstance(approval, dict)
+            and _gateway_approval_key(approval) == _gateway_approval_key(payload)
+        )
+
     def surface_parked_approval(status):
         approval = status.get("approval")
         if str(status.get("status") or "").strip().lower() == "waiting_for_approval" and isinstance(approval, dict):
@@ -1042,6 +1059,7 @@ def _await_gateway_run_result(
                         put_gateway_event=put_gateway_event, cancel_event=cancel_event,
                         on_seq=lambda seq: last_seq.__setitem__(0, seq), final_text=STREAM_PARTIAL_TEXT.get(stream_id, ""),
                         stop_on_truncated=True, surfaced_approval_ids=surfaced_approval_ids,
+                        output_is_authoritative=True, approval_is_current=approval_is_current,
                     )
                 if outcome == "ended":
                     return text, usage
