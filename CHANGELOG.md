@@ -84,6 +84,12 @@
 
 ### Fixed
 
+- **Colon-tagged Custom models route correctly when the default provider is Ollama, local or vLLM.** With
+  `model.provider: ollama` (or another alias of the custom endpoint) plus a `base_url`, picking a Custom-group model
+  whose id carries a tag such as `qwen3.8:27b` failed with "custom:qwen3.8 not configured": the tag's colon was read as
+  a provider separator. Such picks now keep the model id bare and route to the configured endpoint with its key, and a
+  named provider (including one literally called `custom-configured`) keeps its own endpoint and key.
+  (#7966 by @ybai08, fixes #7955)
 - **A Gateway turn that spans a WebUI restart streams again after the tab reattaches.** #7785 reattached such
   runs, but the reopened tab showed only a spinner until the run ended, and only the final answer text was saved:
   the reattach worker polled `GET /v1/runs/{id}` and never subscribed to `/v1/runs/{id}/events`. It now restores
