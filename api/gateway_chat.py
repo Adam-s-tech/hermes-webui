@@ -976,7 +976,8 @@ def _get_gateway_run_status(base_url: str, api_key: str, run_id: str) -> dict:
 def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | None:
     """Rebuild live text/reasoning/tool state from this stream's run journal; return the replay cursor.
 
-    Relayed rows carry ``gateway_seq``, so the journal is the replay cursor; None (poll only) for rows without one.
+    Relayed rows carry ``gateway_seq``, so the journal is the replay cursor; None (poll only) for rows without one
+    or when the journal cannot be read (an unread journal proves no cursor, so replaying from -1 would duplicate).
     """
     from api.run_journal import read_run_events
 
@@ -984,7 +985,7 @@ def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | Non
         events = read_run_events(session_id, stream_id).get("events") or []
     except Exception:
         logger.debug("Failed to read run journal for reattached stream %s", stream_id, exc_info=True)
-        events = []
+        return None
     stateful, cursor = [], -1
     for row in events:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}

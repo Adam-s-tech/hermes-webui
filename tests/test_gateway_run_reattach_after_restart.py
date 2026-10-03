@@ -689,6 +689,42 @@ def test_reattach_falls_back_to_status_polling(isolated_sessions, monkeypatch, w
     assert not any(e["event"] == "token" and e["payload"].get("text") == "x" for e in _journal(sid, stream_id))
 
 
+def test_reattach_polls_without_replay_when_the_journal_read_fails(isolated_sessions, monkeypatch):
+    from api import run_journal
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_journal_unreadable")
+    _relayed_before_restart(sid, stream_id, [("token", {"text": "A", "gateway_seq": 0})])
+    real_read, failed = run_journal.read_run_events, []
+
+    def read_once_broken(*args, **kwargs):
+        if not failed:
+            failed.append(True)
+            raise OSError("journal unreadable")
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(run_journal, "read_run_events", read_once_broken)
+    opened = []
+
+    def open_events(base_url, headers, run_id, last_seq=-1):
+        opened.append(last_seq)
+        return _sse((0, {"event": "message.delta", "delta": "A"}), (1, {"event": "message.delta", "delta": "B"}))
+
+    monkeypatch.setattr(gateway_chat, "_open_gateway_run_events", open_events)
+    statuses = iter(["running"])  # the pre-stream probe sees the run still going
+    monkeypatch.setattr(
+        gateway_chat, "_get_gateway_run_status",
+        lambda b, k, r: {"run_id": r, "status": next(statuses, "completed"), "output": "AB"},
+    )
+    gateway_chat.resume_gateway_runs_after_restart()
+    _wait_for_reattach_threads()
+
+    assert failed and opened == []  # an unread journal proves no cursor: poll only
+    tokens = [(e["payload"].get("gateway_seq"), e["payload"].get("text")) for e in _journal(sid, stream_id) if e["event"] == "token"]
+    assert tokens == [(0, "A")]
+    saved = _saved(sid)
+    assert saved["messages"][-1]["content"] == "AB"
+    assert saved["active_stream_id"] is None and saved["gateway_run"] is None
+
+
 def test_reattach_resurfaces_an_approval_relayed_before_the_restart(isolated_sessions, monkeypatch):
     sid, stream_id = _orphaned_gateway_turn(run_id="run_parked_stream")
     _relayed_before_restart(sid, stream_id, [("token", {"text": "checking ", "gateway_seq": 0})])
