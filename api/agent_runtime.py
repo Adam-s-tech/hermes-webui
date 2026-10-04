@@ -37,7 +37,7 @@ _AGENT_UPDATE_MARKER = ".hermes-update-in-progress"
 _AGENT_RECOVERY_MARKERS = (".update-incomplete", ".lazy-refresh-incomplete")
 _AGENT_UPDATE_MAX_AGE_SECONDS = 20 * 60
 # Slow local Git reads must not look like source drift after just two seconds.
-# Keep a finite budget per command; unreadable revisions still fail closed.
+# Share one total budget across all reads; unreadable revisions fail closed.
 _GIT_REVISION_TIMEOUT_SECONDS = 10
 # The update marker holds a PID and a start timestamp (two short numeric lines).
 # Anything larger is not a legitimate marker; cap the read so a huge or growing
@@ -66,7 +66,15 @@ def _read_agent_revision(
     *,
     module_path: Path | None = None,
 ) -> str | None:
-    """Return the loaded Agent checkout HEAD, or ``None`` if it is not tracked."""
+    """Return the tracked Agent HEAD within one total Git-read budget."""
+    deadline = time.monotonic() + _GIT_REVISION_TIMEOUT_SECONDS
+
+    def remaining_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("git", _GIT_REVISION_TIMEOUT_SECONDS)
+        return remaining
+
     if agent_dir is None:
         return None
 
@@ -86,7 +94,7 @@ def _read_agent_revision(
             check=False,
             capture_output=True,
             text=True,
-            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
+            timeout=remaining_timeout(),
             creationflags=windows_hide_flags(),
         )
         if worktree_result.returncode != 0:
@@ -107,7 +115,7 @@ def _read_agent_revision(
             check=False,
             capture_output=True,
             text=True,
-            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
+            timeout=remaining_timeout(),
             creationflags=windows_hide_flags(),
         )
         if tracked_result.returncode != 0:
@@ -117,12 +125,15 @@ def _read_agent_revision(
             check=False,
             capture_output=True,
             text=True,
-            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
+            timeout=remaining_timeout(),
             creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError):
         return None
 
+    # Scheduling/process-creation overhead can exceed a subprocess timeout.
+    if time.monotonic() >= deadline:
+        return None
     revision = revision_result.stdout.strip()
     return revision if revision_result.returncode == 0 and revision else None
 
