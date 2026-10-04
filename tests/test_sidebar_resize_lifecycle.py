@@ -66,12 +66,25 @@ def _extract_collapse_state_block() -> str:
     return tail[: save_at + len(save_block)] + ";"
 
 
+def _extract_group_loop() -> str:
+    """The real group-render loop from sessions.js, verbatim: builds the
+    session-date-group DOM including the real hdr.onclick handler. Sliced
+    from its start marker to the virtualization anchor restore that follows
+    it in production."""
+    start_marker = "let globalSessionRowIndex=0;"
+    end_marker = "if(virtualAnchorScrollTop!==null){"
+    start = SESSIONS_JS.index(start_marker)
+    end = SESSIONS_JS.index(end_marker, start)
+    return SESSIONS_JS[start:end]
+
+
 HARNESS_HTML = """<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>resize lifecycle harness</title></head>
 <body>
 <div id="sidebar" style="width: 360px; height: 300px;"></div>
 <div id="sidebarResize" style="width: 5px; height: 300px;"></div>
+<div id="sessionList"></div>
 <script>
 window.$ = sel => document.querySelector(sel);
 window._syncWorkspacePanelInlineWidth = () => {};
@@ -114,6 +127,42 @@ window.__renderGroups = (labels, rowsPerGroup) => {
   }
   return visible;
 };
+// Real render + click path: the collapse-state seed block and the group
+// loop below are VERBATIM slices of static/sessions.js — the seed block
+// re-runs on every render there, exactly as it does here, and hdr.onclick
+// is the real production handler (no copied logic). The loop's external
+// names (list, groups, virtualWindow, _renderOneSession,
+// _sessionVirtualSpacer) are bound here; renderSessionListFromCache is
+// wired to this same function so the handler's re-render call runs the
+// real loop again.
+window.__buildGroups = () => {
+  const list = document.getElementById('sessionList');
+  list.innerHTML = '';
+  const groups = window.__groups || [];
+  const virtualWindow = {virtualized:false, start:0, end:1000000, itemHeight:24};
+  const _renderOneSession = (s, isPinned) => {
+    const row = document.createElement('div');
+    row.className = 'session-row' + (isPinned ? ' pinned' : '');
+    row.textContent = s.title;
+    return row;
+  };
+  const _sessionVirtualSpacer = (h, pos) => {
+    const d = document.createElement('div');
+    d.className = 'session-virtual-spacer ' + pos;
+    d.style.height = h + 'px';
+    return d;
+  };
+__COLLAPSE_STATE__
+__GROUP_LOOP__
+};
+window.renderSessionListFromCache = window.__buildGroups;
+window.__seedGroupsFixture = () => {
+  window.__groups = [
+    {label:'Today', items:[{title:'s1'},{title:'s2'}]},
+    {label:'Yesterday', items:[{title:'s3'},{title:'s4'}]},
+    {label:'Older', items:[{title:'s5'},{title:'s6'}]},
+  ];
+};
 </script>
 </body></html>
 """
@@ -121,8 +170,10 @@ window.__renderGroups = (labels, rowsPerGroup) => {
 
 def _build_harness_html() -> str:
     collapse = _extract_collapse_state_block()
-    return HARNESS_HTML.replace("__INIT_RESIZE__", _extract_init_resize()).replace(
-        "__COLLAPSE_STATE__", collapse
+    return (
+        HARNESS_HTML.replace("__INIT_RESIZE__", _extract_init_resize())
+        .replace("__COLLAPSE_STATE__", collapse)
+        .replace("__GROUP_LOOP__", _extract_group_loop())
     )
 
 
@@ -176,15 +227,14 @@ def _pointer(page, type_, *, target="#sidebarResize", x=100, pointer_id=1, point
 
 
 @pytest.fixture
-def page():
+def page(tmp_path):
     _require_playwright()
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = browser.new_context()
         pg = context.new_page()
-        import tempfile
 
-        tmp = Path(tempfile.mkstemp(suffix=".html")[1])
+        tmp = tmp_path / "harness.html"
         tmp.write_text(_build_harness_html(), encoding="utf-8")
         pg.goto(tmp.as_uri())
         pg.wait_for_load_state("domcontentloaded")
@@ -426,3 +476,72 @@ def test_malformed_or_unavailable_storage_preserves_state(page):
     assert page.evaluate("() => window.__hermesDateGroupCollapsed['TODAY']") is True, (
         "an unavailable read must preserve the current state"
     )
+
+
+REAL_PATH_COUNTS_JS = """() => ({
+    headers: document.querySelectorAll('.session-date-header').length,
+    rows: document.querySelectorAll('.session-row').length,
+    visibleBodies: [...document.querySelectorAll('.session-date-body')]
+        .filter(b => b.style.display !== 'none').length,
+})"""
+
+
+@pytest.mark.parametrize(
+    "raw_stored,kind",
+    [
+        ('"abc"', "string root"),
+        ("5", "number root"),
+        ("true", "boolean root"),
+        ('["x"]', "array root"),
+    ],
+)
+def test_non_object_stored_snapshot_renders_and_recovers(page, raw_stored, kind):
+    """Gate Oct 4: a stored collapse value that is valid JSON but not an
+    object must route through the malformed-read fallback. Drives the REAL
+    render loop and the REAL hdr.onclick handler from static/sessions.js:
+    every header and row must render, no page error may fire, and the first
+    real click must collapse its group and repair storage to a real object
+    snapshot.
+    """
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.evaluate(
+        "(raw) => localStorage.setItem('hermes-date-groups-collapsed', raw)",
+        raw_stored,
+    )
+    page.evaluate("() => window.__seedGroupsFixture()")
+    page.evaluate("() => window.__buildGroups()")
+    assert not errors, f"{kind}: the real render must not throw"
+    assert page.evaluate(REAL_PATH_COUNTS_JS) == {"headers": 3, "rows": 6, "visibleBodies": 3}, (
+        f"{kind}: a non-object snapshot must render every header and row expanded"
+    )
+
+    # The real production click handler: toggles, saves, re-renders.
+    page.click(".session-date-header")
+    assert not errors, f"{kind}: the real header click must not throw"
+    stored = page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")
+    assert json.loads(stored) == {"Today": True}, (
+        f"{kind}: the first successful save must repair storage to a real object"
+    )
+    after = page.evaluate(REAL_PATH_COUNTS_JS)
+    assert after["headers"] == 3 and after["rows"] == 4 and after["visibleBodies"] == 2, (
+        f"{kind}: after the click, Today must be collapsed and the rest intact"
+    )
+
+
+def test_stored_null_snapshot_renders_expanded(page):
+    """Gate Oct 4: stored `null` is a valid empty snapshot — everything
+    renders expanded (master crashed here; the pending-override head must
+    not), and the real click path still works."""
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.evaluate("() => localStorage.setItem('hermes-date-groups-collapsed', 'null')")
+    page.evaluate("() => window.__seedGroupsFixture()")
+    page.evaluate("() => window.__buildGroups()")
+    assert not errors, "stored null must not throw in the real render"
+    assert page.evaluate(REAL_PATH_COUNTS_JS) == {"headers": 3, "rows": 6, "visibleBodies": 3}
+
+    page.click(".session-date-header")
+    assert not errors, "stored null: the real header click must not throw"
+    stored = page.evaluate("() => localStorage.getItem('hermes-date-groups-collapsed')")
+    assert json.loads(stored) == {"Today": True}

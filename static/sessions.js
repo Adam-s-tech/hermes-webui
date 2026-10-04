@@ -8653,7 +8653,12 @@ function renderSessionListFromCache(){
     let raw=null;
     try{ raw=localStorage.getItem('hermes-date-groups-collapsed'); }catch(e){ return null; }
     if(raw===null||raw==='') return {};
-    try{ return JSON.parse(raw)||{}; }catch(e){ return null; }
+    // A valid snapshot must be a JSON object. Non-object roots (string,
+    // number, boolean, array) route through the malformed-read fallback:
+    // `k in fresh` in the merge throws on them and kills the render after
+    // the list has already been cleared. Stored `null` is a valid empty
+    // snapshot (everything expanded).
+    try{ const v=JSON.parse(raw); if(v===null) return {}; return (typeof v==='object'&&!Array.isArray(v))?v:null; }catch(e){ return null; }
   };
   const _mergeStoredCollapsed=()=>{
     const fresh=_readStoredCollapsed();
