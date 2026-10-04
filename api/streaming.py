@@ -4381,7 +4381,10 @@ def _stream_reasoning_owner(msg, is_last, positional_idx, tool_call_segments, op
     bound = [tool_call_segments[i].pop(0) for i in call_ids if tool_call_segments.get(i)]
     content = msg.get('content')
     interim = None
-    compact = _compact_for_echo_compare(content) if isinstance(content, str) else ''
+    # Codex Responses keeps a tool round's commentary in codex_message_items, not content
+    from api.media_snapshots import codex_commentary_text
+    match_text = (content if isinstance(content, str) else '') + codex_commentary_text(msg)
+    compact = _compact_for_echo_compare(match_text) if match_text else ''
     # Exact text first, then the longest contained one, so an omitted interim
     # that is a prefix of this step's text cannot claim it.
     hits = [i for i, (text, _) in enumerate(interim_segments) if compact and text and text in compact]
@@ -4390,6 +4393,8 @@ def _stream_reasoning_owner(msg, is_last, positional_idx, tool_call_segments, op
     if hit is not None:
         interim = interim_segments[hit][1]
         del interim_segments[:hit + 1]
+    if is_last and not bound and open_segment is not None:
+        return open_segment  # the final step's own thinking beats a repeated-commentary hit
     if bound or interim is not None:
         # parallel calls: only the first-started call carries the segment; a
         # tool step with commentary had it bound at its interim message

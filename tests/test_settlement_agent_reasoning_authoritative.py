@@ -378,3 +378,50 @@ def test_explicit_id_out_of_start_order_leaves_idless_steps_unbound(cleanup_test
          {'role': 'assistant', 'content': 'done', 'reasoning': None}],
     )
     assert _reasonings(saved) == [None, 'think A', None]
+
+
+def _codex_commentary_step(call_id, text, reasoning):
+    # agent/codex_responses_adapter.py: commentary lives in codex_message_items, content is ''
+    step = _tool_step(call_id, reasoning)
+    step['codex_message_items'] = [{'type': 'message', 'role': 'assistant', 'phase': 'commentary',
+                                    'content': [{'type': 'output_text', 'text': text}]}]
+    return step
+
+
+_CODEX_SCRIPT = [('reasoning', 'think A'), ('interim', 'Running the test suite.'), ('tool', 'c1')]
+
+
+def test_codex_commentary_final_repeats_commentary_with_agent_reasoning(cleanup_test_sessions):
+    saved = _run_turn(
+        _CODEX_SCRIPT + [('reasoning', 'final'), ('token', 'Running the test suite. All green.')],
+        [_codex_commentary_step('c1', 'Running the test suite.', 'think A'), _tool_result('c1'),
+         {'role': 'assistant', 'content': 'Running the test suite. All green.', 'reasoning': None}],
+    )
+    assert _reasonings(saved) == ['think A', 'final']
+
+
+def test_codex_commentary_final_repeats_commentary_without_thinking(cleanup_test_sessions):
+    saved = _run_turn(
+        _CODEX_SCRIPT + [('token', 'Running the test suite. All green.')],
+        [_codex_commentary_step('c1', 'Running the test suite.', 'think A'), _tool_result('c1'),
+         {'role': 'assistant', 'content': 'Running the test suite. All green.', 'reasoning': None}],
+    )
+    assert _reasonings(saved) == ['think A', None]
+
+
+def test_codex_commentary_step_without_agent_reasoning_keeps_stream_segment(cleanup_test_sessions):
+    saved = _run_turn(
+        _CODEX_SCRIPT + [('reasoning', 'final'), ('token', 'Running the test suite. All green.')],
+        [_codex_commentary_step('c1', 'Running the test suite.', None), _tool_result('c1'),
+         {'role': 'assistant', 'content': 'Running the test suite. All green.', 'reasoning': None}],
+    )
+    assert _reasonings(saved) == ['think A', 'final']
+
+
+def test_codex_commentary_final_does_not_repeat_commentary(cleanup_test_sessions):
+    saved = _run_turn(
+        _CODEX_SCRIPT + [('reasoning', 'final'), ('token', 'All green.')],
+        [_codex_commentary_step('c1', 'Running the test suite.', 'think A'), _tool_result('c1'),
+         {'role': 'assistant', 'content': 'All green.', 'reasoning': None}],
+    )
+    assert _reasonings(saved) == ['think A', 'final']
