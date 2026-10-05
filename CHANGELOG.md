@@ -105,6 +105,14 @@
 
 ### Fixed
 
+- **Thinking cards stay on the step that produced them after a reload.** With adaptive-thinking models in long
+  agentic turns, settlement let a drifted stream segment override the reasoning the Agent had already saved on each
+  step, so after a reload a trace could show up a step early, twice, or on a step that never thought (one real
+  session had 1,185 of 3,576 steps misattributed). The Agent's own `reasoning` on a step, including an explicit
+  none, now wins. When a runtime doesn't set it, each streamed segment is bound to the step that produced it (tool-call
+  starts and interim commentary, including Codex Responses commentary kept in `codex_message_items`), and Agents too old
+  to report tool starts keep positional settlement. (#7788 by @carlotestor)
+
 - **Colon-tagged Custom models route correctly when the default provider is Ollama, local or vLLM.** With
   `model.provider: ollama` (or another alias of the custom endpoint) plus a `base_url`, picking a Custom-group model
   whose id carries a tag such as `qwen3.8:27b` failed with "custom:qwen3.8 not configured": the tag's colon was read as
