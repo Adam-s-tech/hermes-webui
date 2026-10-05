@@ -4393,8 +4393,11 @@ def _stream_reasoning_owner(msg, is_last, positional_idx, tool_call_segments, op
     if hit is not None:
         interim = interim_segments[hit][1]
         del interim_segments[:hit + 1]
-    if is_last and not bound and open_segment is not None:
-        return open_segment  # the final step's own thinking beats a repeated-commentary hit
+    if is_last and not bound and open_segment is not None and positional_idx is None:
+        # The final step's own thinking beats a repeated-commentary hit. Not when a
+        # positional mapping exists (Agents without tool_start_callback): there the
+        # positional index decides, or a silent final step inherits an earlier step's thinking.
+        return open_segment
     if bound or interim is not None:
         # parallel calls: only the first-started call carries the segment; a
         # tool step with commentary had it bound at its interim message
