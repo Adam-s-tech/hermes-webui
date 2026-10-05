@@ -32,6 +32,12 @@
   `/api/sessions` + `/api/projects` read in front of the cursor, which held the composer for seconds on a long
   session list. The button, the shortcut, `/new`, and the no-session branches of `/terminal` and `/goal` now rely on
   `newSession()`'s refresh. (#7992, #7998 by @ybai08; #7936, #7996)
+- **The first message from an empty composer is sent without waiting for a second session-list read.** With no
+  conversation open, `send()` created the session and then awaited its own `renderSessionList()` before
+  `POST /api/chat/start`, so on a long session list the first message sat behind a full `/api/sessions` +
+  `/api/projects` read. All nine no-session branches of `send()` (the ordinary send path and the slash commands) now
+  rely on `newSession()`'s forced refresh; the new row still appears, becomes active and shows it is streaming.
+  (#8013 by @ybai08, fixes #8004)
 - **Switching profiles keeps the skill-count cache.** `switch_profile()` used to clear every profile's cached skill
   counts, so the next profile list re-parsed every profile's `SKILL.md` tree. Counts are keyed per profile directory,
   so the cache now survives a switch; the mtime probe and 300 s TTL still catch real changes, and the active-org
