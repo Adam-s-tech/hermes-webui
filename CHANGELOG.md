@@ -99,6 +99,13 @@
 
 ### Fixed
 
+- **Thinking cards stay on the step that produced them after a reload.** With adaptive-thinking models in long
+  agentic turns, settlement let a drifted stream segment override the reasoning the Agent had already saved on each
+  step, so after a reload a trace could show up a step early, twice, or on a step that never thought (one real
+  session had 1,185 of 3,576 steps misattributed). The Agent's own `reasoning` on a step, including an explicit
+  none, now wins. When a runtime doesn't set it, each streamed segment is bound to the step that produced it (tool-call
+  starts and interim commentary, including Codex Responses commentary kept in `codex_message_items`), and Agents too old
+  to report tool starts keep positional settlement. (#7788 by @carlotestor)
 - **Sidebar and workspace-panel resizing no longer gets stuck, and date-group collapse survives bad saved state.**
   Dragging a resize handle and then losing the window (a blur, a lost pointer, a release outside the page) could leave
   the drag running so the panel kept following the cursor; the handles now use pointer capture with a fallback that
